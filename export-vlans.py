@@ -9,6 +9,7 @@ snmp_community = 'public'
 # После этого всё будет работать.
 
 from pysnmp.hlapi import *
+import pickle
 
 
 # Текстовое представление списка вланов
@@ -24,15 +25,15 @@ def vlan_array_to_str(arr):
             dia.append(elem)
         else:
             if len(dia) > 1:
-                result = result + ',' + "{}-{}".format(min(dia), max(dia))
+                result = result + ', ' + "{} to {}".format(min(dia), max(dia))
             else:
-                result = result + ',' + str(dia[0])
+                result = result + ', ' + str(dia[0])
             dia = [elem]
     if len(dia) > 1:
-        result = result + ',' + "{}-{}".format(min(dia), max(dia))
+        result = result + ', ' + "{} to {}".format(min(dia), max(dia))
     else:
-        result = result + ',' + str(dia[0])
-    result = result.lstrip(',').rstrip(',')
+        result = result + ', ' + str(dia[0])
+    result = result.strip(',').strip(' ')
     return result
 
 
@@ -177,15 +178,65 @@ def get_media_type():
     )
 
 
+def get_lacp_port_activity():
+    return parse_snmp_table(
+        mib='DLINK-DGS-1210-F1-SERIES-MIB',
+        handler_list={
+            'laPortControlIndex': [None, snmp_string],
+            'laPortActorActivity': [None, snmp_string],
+            'laPortActorTimeout': [None, snmp_string],
+        }
+    )
+
+
+def get_lacp_groups():
+    return parse_snmp_table(
+        mib='DLINK-DGS-1210-F1-SERIES-MIB',
+        handler_list={
+            'laPortChannelIfIndex': [None, snmp_int],
+            'laPortChannelMemberList': [None, snmp_portlist],
+            'laPortChannelMode': [None, snmp_string],
+        }
+    )
+
+
+debug = True
+
 # Получаем данные
-vlan_info = get_vlan_info()
-pvid_info = get_pvid_info()
-port_desc_info = get_port_description()
-if_mb_info = get_if_mib()
-phy_media_info = get_media_type()
+if not debug:
+    vlan_info = get_vlan_info()
+    pvid_info = get_pvid_info()
+    port_desc_info = get_port_description()
+    if_mb_info = get_if_mib()
+    phy_media_info = get_media_type()
+    lacp_info = get_lacp_groups()
+
+    with open('c:\\data.pickle', 'wb') as f:
+        pickle.dump((vlan_info, pvid_info, port_desc_info, if_mb_info, phy_media_info, lacp_info), f)
+
+else:
+    with open('c:\\data.pickle', 'rb') as f:
+        (vlan_info, pvid_info, port_desc_info, if_mb_info, phy_media_info, lacp_info) = pickle.load(f)
 
 # Отступ
-tab = "    "
+tab = "  "
+block_delimiter = "!\n"
+
+# Перебираем все LACP линки
+for port_channel_id in lacp_info:
+    # Пропускаем пустые группы
+    lacp_group = lacp_info[port_channel_id]
+    if lacp_group['laPortChannelMode'] == 'disable':
+        continue
+
+    # Генерируем красивое имя
+    print("interface Port-channel{}".format(lacp_group['laPortChannelIfIndex']))
+    # Сортируем список портов для красивого вывода
+    member_ports = lacp_group['laPortChannelMemberList']
+    member_ports.sort()
+    print(tab, "# Member ports: {}".format(vlan_array_to_str(member_ports)))
+    print(tab, "mode {}".format(lacp_group['laPortChannelMode']))
+    print(block_delimiter)
 
 # Перебираем все полученные интерфейсы
 for phy_int_id in phy_media_info:
@@ -256,5 +307,13 @@ for phy_int_id in phy_media_info:
             print("More then one untagged VLAN on ifIndex {}, {}".format(phy_int_id, untagged_vlans))
             exit(-1)
 
+    # Проверяем, входит ли порт в группу port-channel
+    for port_channel_id in lacp_info:
+        # Пропускаем пустые группы
+        lacp_group = lacp_info[port_channel_id]
+        if lacp_group['laPortChannelMode'] == 'disable':
+            continue
+        if phy_int_id in lacp_group['laPortChannelMemberList']:
+            print(tab, 'channel-group {}'.format(lacp_group['laPortChannelIfIndex']))
     # Разделитель описаний портов
-    print("!")
+    print(block_delimiter)
